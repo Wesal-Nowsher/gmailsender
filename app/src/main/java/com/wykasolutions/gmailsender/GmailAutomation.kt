@@ -11,7 +11,7 @@ class GmailAutomation : AccessibilityService() {
  private val handler = Handler(Looper.getMainLooper())
  private var startedAt = 0L
  private var clickedAt = 0L
- override fun onServiceConnected() { instance = this }
+ override fun onServiceConnected() { instance = this; if (SendQueue.current(this).optString("state") == "awaiting") SendQueue.setState(this, "uncertain", "Service restarted after Send. Check Gmail Sent.") }
  override fun onDestroy() { instance = null; super.onDestroy() }
  override fun onInterrupt() { SendQueue.setState(this, "paused", "Accessibility service interrupted") }
  override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -28,11 +28,12 @@ class GmailAutomation : AccessibilityService() {
  private fun inspect() {
   val j = SendQueue.current(this); val state = j.optString("state")
   if (state != "composing" && state != "awaiting") return
-  val root = rootInActiveWindow ?: return
+  val root = rootInActiveWindow ?: run { handler.postDelayed({ inspect() }, 800); return }
+  if (root.packageName?.toString() != "com.google.android.gm") { SendQueue.setState(this, if (state == "awaiting") "uncertain" else "paused", "Gmail is no longer visible"); return }
   val all = nodes(root)
-  val strings = all.mapNotNull { it.text?.toString() ?: it.contentDescription?.toString() }
+  val strings = all.mapNotNull { listOfNotNull(it.text?.toString(), it.contentDescription?.toString()).joinToString(" ") }
   if (state == "awaiting") {
-   if (strings.any { it.contains("Sent", true) || it.contains("Undo", true) }) { SendQueue.confirmed(this); return }
+   if (all.any { it.viewIdResourceName?.contains("snackbar_text") == true && (it.text?.toString()?.trim()?.equals("Message sent", true) == true || it.text?.toString()?.trim()?.equals("Sent", true) == true) }) { SendQueue.confirmed(this); return }
    if (System.currentTimeMillis() - clickedAt > 10000) SendQueue.setState(this, "uncertain", "Send tapped but confirmation was not observed. Check Gmail Sent before proceeding.")
    else handler.postDelayed({ inspect() }, 850)
    return

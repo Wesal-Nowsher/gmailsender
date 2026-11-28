@@ -565,17 +565,12 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this)
             .setTitle("Capture the Gmail screen")
             .setMessage(
-                "Gmail will open a new email. Wait about three seconds, then come " +
-                    "back here and tap Save diagnostics.\n\nNothing is sent."
+                "Gmail will open. Tap Compose there, wait about three seconds, then " +
+                    "come back here and tap Save diagnostics.\n\nNothing is sent."
             )
             .setPositiveButton("Open Gmail") { _, _ ->
                 GmailBot.captureNext = true
-                GmailBot.openCompose(
-                    this,
-                    "test@example.com",
-                    "Test subject",
-                    "Test message body."
-                )
+                GmailBot.openGmail(this)
             }
             .setNegativeButton("Cancel", null)
             .show()

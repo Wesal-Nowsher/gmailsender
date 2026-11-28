@@ -167,6 +167,37 @@ object Screen {
         return top.maxByOrNull { bounds(it).right }
     }
 
+    // ---- Inbox controls, confirmed from a real Gmail screen recording ----
+
+    /** Gmail's Compose button on the inbox (#compose_button). */
+    fun composeButton(nodes: List<AccessibilityNodeInfo>): AccessibilityNodeInfo? =
+        nodes.firstOrNull { node ->
+            val id = node.viewIdResourceName.orEmpty().substringAfterLast('/')
+            id == "compose_button" && tappable(node) != null
+        } ?: nodes.firstOrNull { node ->
+            label(node).trim().equals("Compose", true) && tappable(node) != null
+        }
+
+    /**
+     * The account button on the inbox (#selected_account_disc_gmail). Its label
+     * reads "Signed in as <name> <address>", so it says which account is active.
+     */
+    fun accountDisc(nodes: List<AccessibilityNodeInfo>): AccessibilityNodeInfo? =
+        nodes.firstOrNull { node ->
+            node.viewIdResourceName.orEmpty().contains("selected_account_disc", true)
+        } ?: nodes.firstOrNull { node ->
+            label(node).startsWith("Signed in as", true)
+        }
+
+    /** The address Gmail says is currently signed in, read off that button. */
+    fun activeAccount(nodes: List<AccessibilityNodeInfo>): String =
+        accountDisc(nodes)?.let { EMAIL.find(label(it))?.value }.orEmpty()
+
+    /** True when Gmail is showing a mail list rather than a compose screen. */
+    fun isInbox(nodes: List<AccessibilityNodeInfo>): Boolean =
+        composeButton(nodes) != null ||
+            nodes.any { it.viewIdResourceName.orEmpty().contains("thread_list_view", true) }
+
     /**
      * The account the message would be sent from: an address shown on screen
      * that is not inside a box the owner types into.

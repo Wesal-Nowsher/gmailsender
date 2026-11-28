@@ -18,6 +18,7 @@ import android.view.Gravity
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -42,6 +43,7 @@ class MainActivity : Activity() {
     private lateinit var progress: TextView
     private lateinit var failureReport: TextView
     private lateinit var botState: TextView
+    private lateinit var practiceRun: CheckBox
 
     private val handler = Handler(Looper.getMainLooper())
     private val draft by lazy { getSharedPreferences("draft", 0) }
@@ -214,6 +216,14 @@ class MainActivity : Activity() {
         // 5 - run it
         val runCard = card("5  Run the bot")
         botState = label(runCard, "", 15f, true)
+        practiceRun = CheckBox(this).also {
+            it.text = "Practice run - fill everything in but do not tap Send"
+            it.textSize = 15f
+            it.setTextColor(Color.parseColor("#17243D"))
+            it.isChecked = GmailBot.dryRun(this)
+            it.setOnCheckedChangeListener { _, checked -> GmailBot.setDryRun(this, checked) }
+            runCard.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        }
         label(
             runCard,
             "The bot needs Accessibility permission to work Gmail. While it runs, " +
@@ -531,7 +541,6 @@ class MainActivity : Activity() {
     }
 
     private fun saveDiagnostics() {
-        GmailBot.instance?.dumpNow("manual")
         val text = Diagnostics.read(this)
         if (text.isBlank()) {
             Toast.makeText(this, "Nothing recorded yet", Toast.LENGTH_LONG).show()
@@ -577,7 +586,13 @@ class MainActivity : Activity() {
     private fun refreshProgress() {
         if (!::progress.isInitialized) return
 
-        botState.text = if (GmailBot.isEnabled()) "Bot is on." else "Bot is off."
+        botState.text = buildString {
+            append(if (GmailBot.isEnabled()) "Bot is on." else "Bot is off.")
+            if (GmailBot.step != GmailBot.Step.IDLE) {
+                append("  Step: ").append(GmailBot.step.name.lowercase())
+            }
+            if (GmailBot.note.isNotBlank()) append("\n").append(GmailBot.note)
+        }
         botState.setTextColor(Color.parseColor(if (GmailBot.isEnabled()) "#1F6B3B" else "#8A2B2B"))
 
         if (!Batch.exists(this)) {

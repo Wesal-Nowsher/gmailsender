@@ -1,27 +1,28 @@
 package com.wykasolutions.gmailsender
 
+import android.graphics.Rect
 import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
- * Helpers for reading and tapping what is on the Gmail screen.
+ * Reads and taps what is on the Gmail screen.
  *
- * Gmail does not promise stable view ids, so everything here matches on what a
- * person would actually see - the visible text, the hint in an empty field, or
- * the spoken label on a button.
+ * Gmail does not keep its labels or view ids stable between versions, phones
+ * and languages, so nothing here depends on a particular wording. Fields are
+ * found by where they sit on screen and how they behave, the way a person
+ * finds them, with label matching used only as a tie-breaker.
  */
 object Screen {
 
     val EMAIL = Regex("[A-Z0-9._%+\\-]+@[A-Z0-9.\\-]+\\.[A-Z]{2,}", RegexOption.IGNORE_CASE)
 
-    /** Every node in the window, parents before children. */
     fun all(root: AccessibilityNodeInfo?): List<AccessibilityNodeInfo> {
         if (root == null) return emptyList()
         val out = ArrayList<AccessibilityNodeInfo>()
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
         var guard = 0
-        while (queue.isNotEmpty() && guard < 4000) {
+        while (queue.isNotEmpty() && guard < 5000) {
             val node = queue.removeFirst()
             out.add(node)
             guard++
@@ -32,31 +33,36 @@ object Screen {
 
     /** Visible text, the spoken label, or the hint shown in an empty field. */
     fun label(node: AccessibilityNodeInfo): String {
-        val text = node.text?.toString().orEmpty()
-        if (text.isNotBlank()) return text
-        val description = node.contentDescription?.toString().orEmpty()
-        if (description.isNotBlank()) return description
+        node.text?.toString()?.let { if (it.isNotBlank()) return it }
+        node.contentDescription?.toString()?.let { if (it.isNotBlank()) return it }
         return node.hintText?.toString().orEmpty()
     }
 
-    fun describes(node: AccessibilityNodeInfo, vararg words: String): Boolean {
-        val haystack = buildString {
-            append(node.text?.toString().orEmpty()).append(' ')
-            append(node.contentDescription?.toString().orEmpty()).append(' ')
-            append(node.hintText?.toString().orEmpty()).append(' ')
-            append(node.viewIdResourceName.orEmpty())
-        }
-        return words.any { haystack.contains(it, ignoreCase = true) }
+    /** Only the text actually typed in, ignoring any hint. */
+    fun typedText(node: AccessibilityNodeInfo): String = node.text?.toString().orEmpty()
+
+    fun words(node: AccessibilityNodeInfo): String = buildString {
+        append(node.text?.toString().orEmpty()).append(' ')
+        append(node.contentDescription?.toString().orEmpty()).append(' ')
+        append(node.hintText?.toString().orEmpty()).append(' ')
+        append(node.viewIdResourceName.orEmpty())
     }
 
     fun isEditable(node: AccessibilityNodeInfo): Boolean =
         node.isEditable || node.className?.toString()?.contains("EditText") == true
 
-    /** The node itself if it is tappable, else the nearest parent that is. */
+    fun bounds(node: AccessibilityNodeInfo): Rect =
+        Rect().also { node.getBoundsInScreen(it) }
+
+    fun isOnScreen(node: AccessibilityNodeInfo): Boolean {
+        val r = bounds(node)
+        return node.isVisibleToUser && r.width() > 0 && r.height() > 0
+    }
+
     fun tappable(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
         var current = node
         var depth = 0
-        while (current != null && depth < 10) {
+        while (current != null && depth < 12) {
             if (current.isClickable && current.isEnabled) return current
             current = current.parent
             depth++
@@ -67,6 +73,9 @@ object Screen {
     fun tap(node: AccessibilityNodeInfo?): Boolean =
         tappable(node)?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
 
+    fun focus(node: AccessibilityNodeInfo): Boolean =
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+
     fun setText(node: AccessibilityNodeInfo, value: String): Boolean {
         val args = Bundle()
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
@@ -74,53 +83,98 @@ object Screen {
     }
 
     /**
-     * The compose fields, identified the way a person identifies them.
-     *
-     * "To" is matched strictly rather than as a substring, because plenty of
-     * view ids happen to contain those two letters.
+     * The three compose boxes, worked out from the layout rather than from
+     * wording: they are the typeable boxes on screen, top to bottom, and the
+     * message body is the tall one.
      */
-    fun toField(nodes: List<AccessibilityNodeInfo>) =
-        nodes.firstOrNull { isEditable(it) && looksLikeTo(it) }
-
-    private fun looksLikeTo(node: AccessibilityNodeInfo): Boolean {
-        val id = node.viewIdResourceName.orEmpty().substringAfterLast('/')
-        if (id.contains("recipient", true) || id.equals("to", true) ||
-            id.startsWith("to_", true) || id.endsWith("_to", true)
-        ) return true
-        return listOfNotNull(node.contentDescription?.toString(), node.hintText?.toString())
-            .map { it.trim() }
-            .any { it.equals("To", true) || it.startsWith("To ", true) }
+    class Compose(
+        val to: AccessibilityNodeInfo?,
+        val subject: AccessibilityNodeInfo?,
+        val body: AccessibilityNodeInfo?,
+        val boxes: Int
+    ) {
+        val isCompose: Boolean get() = boxes >= 2
     }
 
-    fun subjectField(nodes: List<AccessibilityNodeInfo>) = nodes.firstOrNull {
-        isEditable(it) && describes(it, "Subject")
-    }
+    fun compose(nodes: List<AccessibilityNodeInfo>): Compose {
+        val boxes = nodes
+            .filter { isEditable(it) && isOnScreen(it) }
+            .distinctBy { bounds(it).flattenToString() }
+            .sortedBy { bounds(it).top }
 
-    fun bodyField(nodes: List<AccessibilityNodeInfo>) = nodes.firstOrNull {
-        isEditable(it) && describes(it, "Compose email", "Message body", "body", "Compose")
-    }
+        if (boxes.isEmpty()) return Compose(null, null, null, 0)
 
-    fun sendButton(nodes: List<AccessibilityNodeInfo>) = nodes.firstOrNull { node ->
-        val label = label(node).trim()
-        label.equals("Send", true) && tappable(node) != null
+        // Named matches win when Gmail does label its fields.
+        fun named(vararg hints: String) = boxes.firstOrNull { node ->
+            val w = words(node)
+            hints.any { w.contains(it, true) }
+        }
+
+        var to = named("to_field", "recipient")
+            ?: boxes.firstOrNull { node ->
+                listOfNotNull(node.contentDescription?.toString(), node.hintText?.toString())
+                    .map { it.trim() }
+                    .any { it.equals("To", true) || it.startsWith("To ", true) }
+            }
+        var subject = named("subject")
+        // The body is the tallest box: it is the only one meant for paragraphs.
+        var body = named("body", "compose email", "message")
+            ?: boxes.maxByOrNull { bounds(it).height() }
+
+        // Fall back to reading position: To, then Subject, then the message.
+        val rest = boxes.filter { it != to && it != subject && it != body }
+        if (to == null) to = rest.firstOrNull() ?: boxes.firstOrNull { it != body }
+        if (subject == null) {
+            subject = boxes.filter { it != to && it != body }
+                .minByOrNull { bounds(it).top }
+        }
+        if (body != null && (body == to || body == subject)) body = null
+
+        return Compose(to, subject, body, boxes.size)
     }
 
     /**
-     * The From row: the account address shown in the compose header. It is the
-     * address that is not inside a text box the owner types into.
+     * The Send control. Gmail draws it as an icon, so it is found by its spoken
+     * label or its view id, and as a last resort by being the right-most
+     * tappable icon along the top bar.
      */
-    fun fromRow(nodes: List<AccessibilityNodeInfo>, known: List<String>): AccessibilityNodeInfo? {
-        val candidates = nodes.filter { node ->
-            !isEditable(node) && EMAIL.containsMatchIn(label(node))
-        }
-        // Prefer a row Gmail itself marks as the sender, then any known account.
-        return candidates.firstOrNull { describes(it, "from") }
-            ?: candidates.firstOrNull { node ->
-                known.any { label(node).contains(it, true) }
-            }
+    fun sendButton(nodes: List<AccessibilityNodeInfo>): AccessibilityNodeInfo? {
+        nodes.firstOrNull { node ->
+            val text = label(node).trim()
+            text.equals("Send", true) && tappable(node) != null
+        }?.let { return it }
+
+        nodes.firstOrNull { node ->
+            val id = node.viewIdResourceName.orEmpty().substringAfterLast('/')
+            (id == "send" || id.startsWith("send_") || id.endsWith("_send")) &&
+                tappable(node) != null
+        }?.let { return it }
+
+        // Icons in the top bar, right-most first: on every Gmail build the
+        // send arrow is the furthest right control while composing.
+        val avoid = listOf("attach", "more", "back", "navigate", "schedule", "discard", "menu")
+        val top = nodes.filter { isOnScreen(it) }
+            .filter { bounds(it).top < 400 && it.isClickable && it.isEnabled }
+            .filter { label(it).length < 24 }
+            .filterNot { node -> avoid.any { words(node).contains(it, true) } }
+        return top.maxByOrNull { bounds(it).right }
     }
 
-    /** Whether this screen is the compose screen rather than the inbox. */
-    fun isCompose(nodes: List<AccessibilityNodeInfo>): Boolean =
-        toField(nodes) != null || sendButton(nodes) != null
+    /**
+     * The account the message would be sent from: an address shown on screen
+     * that is not inside a box the owner types into.
+     */
+    fun fromRow(
+        nodes: List<AccessibilityNodeInfo>,
+        known: List<String>,
+        compose: Compose
+    ): AccessibilityNodeInfo? {
+        val candidates = nodes.filter { node ->
+            node != compose.to && !isEditable(node) && isOnScreen(node) &&
+                EMAIL.containsMatchIn(label(node))
+        }
+        return candidates.firstOrNull { words(it).contains("from", true) }
+            ?: candidates.firstOrNull { node -> known.any { label(node).contains(it, true) } }
+            ?: candidates.minByOrNull { bounds(it).top }
+    }
 }

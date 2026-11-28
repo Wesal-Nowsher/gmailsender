@@ -10,16 +10,22 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
- * Drives the Gmail app the way a person would: opens a compose screen for one
- * recipient, switches the From account if that recipient was assigned to a
- * different business Gmail, checks every field is right, taps Send, and waits
- * to see Gmail confirm before moving on.
+ * Works the Gmail app one recipient at a time, in fixed order:
  *
- * It never taps Send until the recipient, the sending account, the subject and
- * the message on screen all match the queue, so a misread screen stalls the run
- * rather than sending the wrong thing to the wrong person.
+ *   open compose -> set the From account -> type the recipient ->
+ *   type the subject -> type the message -> check it all -> tap Send ->
+ *   wait for Gmail to confirm.
+ *
+ * Every step types the value itself and then reads it back off the screen
+ * before moving on, so nothing is assumed to have worked. A step that cannot
+ * be completed stops the run and records the screen, rather than tapping Send
+ * on a half-filled message.
  */
 class GmailBot : AccessibilityService() {
+
+    enum class Step {
+        IDLE, OPENING, FROM, TO, SUBJECT, BODY, REVIEW, SENDING, CONFIRMING
+    }
 
     companion object {
         const val GMAIL = "com.google.android.gm"
@@ -27,24 +33,38 @@ class GmailBot : AccessibilityService() {
         @Volatile
         var instance: GmailBot? = null
 
-        /** Pause between messages, long enough to look like a person working. */
+        /** The step the bot is on, shown in the app so a stall is visible. */
+        @Volatile
+        var step: Step = Step.IDLE
+
+        /** What the bot is working on, shown in the app. */
+        @Volatile
+        var note: String = ""
+
         const val GAP_MS = 2500L
 
-        private const val COMPOSE_TIMEOUT_MS = 15000L
-        private const val CONFIRM_TIMEOUT_MS = 12000L
-        private const val SWITCH_TIMEOUT_MS = 8000L
+        /** How many looks at the screen a single step gets before giving up. */
+        private const val TRIES_PER_STEP = 10
 
         fun isEnabled() = instance != null
 
-        /** Opens Gmail's compose screen with the message already filled in. */
+        /** Practice mode: do everything except actually tap Send. */
+        fun dryRun(c: Context): Boolean =
+            c.getSharedPreferences("settings", 0).getBoolean("dry_run", false)
+
+        fun setDryRun(c: Context, value: Boolean) {
+            c.getSharedPreferences("settings", 0).edit().putBoolean("dry_run", value).apply()
+        }
+
         fun openCompose(c: Context, recipient: String, subject: String, body: String): Boolean = try {
-            val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + Uri.encode(recipient)))
-                .setPackage(GMAIL)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                .putExtra(Intent.EXTRA_EMAIL, arrayOf(recipient))
-                .putExtra(Intent.EXTRA_SUBJECT, subject)
-                .putExtra(Intent.EXTRA_TEXT, body)
-            c.startActivity(intent)
+            c.startActivity(
+                Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:" + Uri.encode(recipient)))
+                    .setPackage(GMAIL)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    .putExtra(Intent.EXTRA_EMAIL, arrayOf(recipient))
+                    .putExtra(Intent.EXTRA_SUBJECT, subject)
+                    .putExtra(Intent.EXTRA_TEXT, body)
+            )
             true
         } catch (e: Exception) {
             Batch.setState(c, Batch.PAUSED, "Could not open Gmail: ${e.message}")
@@ -52,33 +72,30 @@ class GmailBot : AccessibilityService() {
         }
     }
 
-    /** What the bot is doing with the message currently on screen. */
-    private enum class Phase { WAITING, OPENING, FILLING, SWITCHING, CONFIRMING }
-
     private val handler = Handler(Looper.getMainLooper())
 
-    @Volatile private var phase = Phase.WAITING
-    /** Earliest time the next message may start, so the pace stays human. */
-    @Volatile private var notBefore = 0L
     private var index = -1
     private var recipient = ""
     private var sender = ""
-    private var phaseStartedAt = 0L
-    private var switchAttempts = 0
+    private var tries = 0
+    private var switches = 0
+    private var capturedThisRun = false
+
+    @Volatile
+    private var notBefore = 0L
 
     override fun onServiceConnected() {
         instance = this
-        // If the phone restarted the service while a Send was in flight, the
-        // outcome is unknown. Never guess: ask the owner to check Gmail.
-        if (Batch.state(this) == Batch.RUNNING && phase == Phase.CONFIRMING) {
+        if (Batch.state(this) == Batch.RUNNING && step == Step.CONFIRMING) {
             Batch.setState(this, Batch.UNCERTAIN, "The bot restarted just after tapping Send.")
         }
-        phase = Phase.WAITING
-        step()
+        step = Step.IDLE
+        again(400)
     }
 
     override fun onDestroy() {
         instance = null
+        step = Step.IDLE
         super.onDestroy()
     }
 
@@ -90,93 +107,110 @@ class GmailBot : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.packageName?.toString() != GMAIL) return
+        again(350)
+    }
+
+    private fun again(delay: Long = 650) {
         handler.removeCallbacksAndMessages(null)
-        handler.postDelayed({ step() }, 400)
+        handler.postDelayed({ runCatching { step() } }, delay)
     }
 
-    /** Asks for another look at the screen shortly. */
-    private fun again(delay: Long = 700) {
-        handler.removeCallbacksAndMessages(null)
-        handler.postDelayed({ step() }, delay)
+    fun kick() {
+        step = Step.IDLE
+        capturedThisRun = false
+        again(300)
     }
 
-    private fun enterPhase(next: Phase) {
-        phase = next
-        phaseStartedAt = System.currentTimeMillis()
+    private fun go(next: Step, why: String = "") {
+        step = next
+        tries = 0
+        if (why.isNotBlank()) note = why
     }
 
-    private fun inPhaseFor() = System.currentTimeMillis() - phaseStartedAt
-
-    private fun pause(reason: String) {
-        phase = Phase.WAITING
-        Batch.setState(this, Batch.PAUSED, reason)
+    /** Gives up on this run, saying precisely which step failed and why. */
+    private fun giveUp(nodes: List<AccessibilityNodeInfo>, what: String) {
+        Diagnostics.save(this, "stuck-${step.name.lowercase()}", nodes)
+        step = Step.IDLE
+        Batch.setState(
+            this,
+            Batch.PAUSED,
+            "$what\n\nTap Save diagnostics and send the file - it records exactly " +
+                "what was on the Gmail screen at that moment."
+        )
     }
 
-    // ---------------------------------------------------------------- the loop
+    // ------------------------------------------------------------------ loop
 
     private fun step() {
         if (Batch.state(this) != Batch.RUNNING) {
-            phase = Phase.WAITING
+            step = Step.IDLE
             return
         }
 
-        // Gmail's own screen activity must not shorten the gap between messages.
         val wait = notBefore - System.currentTimeMillis()
-        if (phase == Phase.WAITING && wait > 0) {
-            again(minOf(wait, 1500L))
+        if (step == Step.IDLE && wait > 0) {
+            again(minOf(wait, 1200L))
             return
         }
 
-        if (phase == Phase.WAITING) {
+        if (step == Step.IDLE) {
             startNext()
             return
         }
 
         val root = rootInActiveWindow
         if (root == null || root.packageName?.toString() != GMAIL) {
-            // Gmail left the foreground. Mid-send that is not safe to assume about.
-            if (phase == Phase.CONFIRMING) {
+            if (step == Step.CONFIRMING) {
                 Batch.setState(
                     this,
                     Batch.UNCERTAIN,
-                    "Gmail closed right after Send for $recipient."
+                    "Gmail closed right after Send for $recipient. Check its Sent folder."
                 )
-                phase = Phase.WAITING
-            } else if (inPhaseFor() > COMPOSE_TIMEOUT_MS) {
-                pause("Gmail is not on screen. Open Gmail and tap Resume.")
-            } else {
-                again(900)
+                step = Step.IDLE
+                return
             }
+            if (++tries > TRIES_PER_STEP * 2) {
+                step = Step.IDLE
+                Batch.setState(
+                    this,
+                    Batch.PAUSED,
+                    "Gmail is not on screen. Open Gmail, then tap Resume."
+                )
+            } else again(900)
             return
         }
 
         val nodes = Screen.all(root)
-        when (phase) {
-            Phase.OPENING -> if (Screen.isCompose(nodes)) {
-                enterPhase(Phase.FILLING)
-                again(500)
-            } else if (inPhaseFor() > COMPOSE_TIMEOUT_MS) {
-                dump(nodes, "compose-did-not-open")
-                pause("Gmail's compose screen did not appear for $recipient.")
-            } else {
-                again()
-            }
+        val compose = Screen.compose(nodes)
 
-            Phase.FILLING -> fill(nodes)
-            Phase.SWITCHING -> switchAccount(nodes)
-            Phase.CONFIRMING -> confirm(nodes)
-            Phase.WAITING -> Unit
+        when (step) {
+            Step.OPENING -> opening(nodes, compose)
+            Step.FROM -> fromAccount(nodes, compose)
+            Step.TO -> typeInto(nodes, compose.to, recipient, "recipient", Step.SUBJECT) {
+                it.contains(recipient, true)
+            }
+            Step.SUBJECT -> typeInto(
+                nodes, compose.subject, Batch.subject(this), "subject", Step.BODY
+            ) { it.trim() == Batch.subject(this).trim() }
+            Step.BODY -> typeInto(
+                nodes, compose.body, Batch.body(this), "message", Step.REVIEW
+            ) { it.contains(Batch.body(this).take(25)) }
+            Step.REVIEW -> review(nodes, compose)
+            Step.SENDING -> sending(nodes)
+            Step.CONFIRMING -> confirming(nodes)
+            Step.IDLE -> Unit
         }
     }
 
-    /** Picks up the next recipient and opens a compose screen for them. */
     private fun startNext() {
         val next = Batch.nextSendable(this)
         if (next < 0) {
             if (Batch.blockedByCap(this)) {
-                pause(
-                    "Every account for the remaining recipients has reached " +
-                        "${Senders.DAILY_CAP} sends today. Resume tomorrow, or reassign them."
+                Batch.setState(
+                    this,
+                    Batch.PAUSED,
+                    "Every account for the remaining recipients has hit " +
+                        "${Senders.DAILY_CAP} sends today."
                 )
             } else {
                 val counts = Batch.counts(this)
@@ -186,13 +220,14 @@ class GmailBot : AccessibilityService() {
                     "Finished: ${counts.sent} sent, ${counts.failed} failed."
                 )
             }
+            note = ""
             return
         }
 
         index = next
         recipient = Batch.recipient(this, next)
         sender = Batch.sender(this, next)
-        switchAttempts = 0
+        switches = 0
 
         if (sender.isBlank()) {
             Batch.mark(this, next, Batch.FAILED, "No sending account assigned")
@@ -200,172 +235,229 @@ class GmailBot : AccessibilityService() {
             return
         }
 
-        enterPhase(Phase.OPENING)
-        if (openCompose(this, recipient, Batch.subject(this), Batch.body(this))) again(1200)
+        go(Step.OPENING, "Opening a new email to $recipient")
+        if (openCompose(this, recipient, Batch.subject(this), Batch.body(this))) again(1400)
+    }
+
+    /** Step 1: wait for Gmail's compose screen to actually be up. */
+    private fun opening(nodes: List<AccessibilityNodeInfo>, compose: Screen.Compose) {
+        if (compose.isCompose) {
+            // Record one real compose screen per run, so the layout is known.
+            if (!capturedThisRun) {
+                capturedThisRun = true
+                Diagnostics.save(this, "compose-screen", nodes)
+            }
+            go(Step.FROM, "Checking the sending account")
+            again(500)
+            return
+        }
+        if (++tries > TRIES_PER_STEP) {
+            giveUp(nodes, "Gmail's compose screen did not open for $recipient.")
+        } else again(800)
+    }
+
+    /** Step 2: make sure the message goes out from the assigned account. */
+    private fun fromAccount(nodes: List<AccessibilityNodeInfo>, compose: Screen.Compose) {
+        val row = Screen.fromRow(nodes, Senders.list(this), compose)
+        val shown = row?.let { Screen.label(it) }.orEmpty()
+
+        if (shown.contains(sender, true)) {
+            go(Step.TO, "Typing the recipient")
+            again(400)
+            return
+        }
+
+        if (row == null) {
+            if (++tries > TRIES_PER_STEP) {
+                giveUp(nodes, "Could not see which account would send to $recipient.")
+            } else again()
+            return
+        }
+
+        if (switches >= 3) {
+            giveUp(nodes, "Could not switch from $shown to $sender for $recipient.")
+            return
+        }
+
+        // The account list may already be open from a previous tap.
+        val option = nodes.firstOrNull {
+            it != row && Screen.isOnScreen(it) && Screen.label(it).contains(sender, true)
+        }
+        if (option != null && Screen.tap(option)) {
+            switches++
+            tries = 0
+            again(900)
+            return
+        }
+
+        if (Screen.tap(row)) {
+            switches++
+            tries = 0
+            again(900)
+        } else if (++tries > TRIES_PER_STEP) {
+            giveUp(nodes, "The From row would not open for $recipient.")
+        } else again()
     }
 
     /**
-     * Makes the screen match the queue: the right account, recipient, subject
-     * and message. Only then does it tap Send.
+     * Steps 3 to 5: put one value in one box, then read it back off the screen
+     * before moving to the next box.
      */
-    private fun fill(nodes: List<AccessibilityNodeInfo>) {
+    private fun typeInto(
+        nodes: List<AccessibilityNodeInfo>,
+        field: AccessibilityNodeInfo?,
+        value: String,
+        what: String,
+        next: Step,
+        isRight: (String) -> Boolean
+    ) {
+        if (field == null) {
+            if (++tries > TRIES_PER_STEP) {
+                giveUp(nodes, "Could not find the $what box on Gmail's compose screen.")
+            } else again()
+            return
+        }
+
+        if (isRight(Screen.typedText(field))) {
+            go(next, "Typed the $what")
+            again(400)
+            return
+        }
+
+        if (++tries > TRIES_PER_STEP) {
+            giveUp(nodes, "Could not type the $what into Gmail for $recipient.")
+            return
+        }
+
+        // Tap it, take focus, then type - the same order a person uses.
+        Screen.tap(field)
+        Screen.focus(field)
+        Screen.setText(field, value)
+        again(700)
+    }
+
+    /** Step 6: nothing is sent until all four values match the queue. */
+    private fun review(nodes: List<AccessibilityNodeInfo>, compose: Screen.Compose) {
         val subject = Batch.subject(this)
         val body = Batch.body(this)
 
-        val toField = Screen.toField(nodes)
-        val subjectField = Screen.subjectField(nodes)
-        val bodyField = Screen.bodyField(nodes)
+        val toOk = compose.to?.let { Screen.typedText(it).contains(recipient, true) } == true
+        val subjectOk = compose.subject?.let { Screen.typedText(it).trim() == subject.trim() } == true
+        val bodyOk = compose.body?.let { Screen.typedText(it).contains(body.take(25)) } == true
+        val fromOk = Screen.fromRow(nodes, Senders.list(this), compose)
+            ?.let { Screen.label(it).contains(sender, true) } == true
 
-        // Gmail normally pre-fills these from the intent. Type anything it missed.
-        if (toField != null && !Screen.label(toField).contains(recipient, true)) {
-            Screen.setText(toField, recipient)
-            again(600)
-            return
-        }
-        if (subjectField != null && Screen.label(subjectField).trim() != subject.trim()) {
-            Screen.setText(subjectField, subject)
-            again(600)
-            return
-        }
-        if (bodyField != null && !Screen.label(bodyField).contains(body.take(40))) {
-            Screen.setText(bodyField, body)
-            again(600)
+        if (toOk && subjectOk && bodyOk && fromOk) {
+            go(Step.SENDING, "Sending to $recipient")
+            again(400)
             return
         }
 
-        // The account this message would go out from, right now.
-        val fromRow = Screen.fromRow(nodes, Senders.list(this))
-        val fromShown = fromRow?.let { Screen.label(it) }.orEmpty()
-
-        if (fromShown.isBlank()) {
-            if (inPhaseFor() > COMPOSE_TIMEOUT_MS) {
-                dump(nodes, "no-from-row")
-                pause(
-                    "Could not read which account would send to $recipient. " +
-                        "Tap Save diagnostics and send me the file."
-                )
-            } else again()
+        if (++tries > TRIES_PER_STEP) {
+            val missing = buildList {
+                if (!fromOk) add("sending account")
+                if (!toOk) add("recipient")
+                if (!subjectOk) add("subject")
+                if (!bodyOk) add("message")
+            }.joinToString(", ")
+            giveUp(nodes, "The $missing did not match the queue, so nothing was sent to $recipient.")
             return
         }
 
-        if (!fromShown.contains(sender, true)) {
-            if (switchAttempts >= 3) {
-                dump(nodes, "account-switch-failed")
-                pause(
-                    "Could not switch from $fromShown to $sender for $recipient. " +
-                        "Tap Save diagnostics and send me the file."
-                )
-                return
+        // Go back and fix whichever box lost its value.
+        go(
+            when {
+                !fromOk -> Step.FROM
+                !toOk -> Step.TO
+                !subjectOk -> Step.SUBJECT
+                else -> Step.BODY
             }
-            switchAttempts++
-            if (Screen.tap(fromRow)) {
-                enterPhase(Phase.SWITCHING)
-                again(900)
-            } else {
-                dump(nodes, "from-row-not-tappable")
-                pause("The From row would not open for $recipient.")
-            }
+        )
+        again(500)
+    }
+
+    /** Step 7: tap Send. */
+    private fun sending(nodes: List<AccessibilityNodeInfo>) {
+        if (dryRun(this)) {
+            Batch.mark(this, index, Batch.FAILED, "Practice run - Send was not tapped")
+            Diagnostics.save(this, "practice-run-ready-to-send", nodes)
+            step = Step.IDLE
+            notBefore = System.currentTimeMillis() + GAP_MS
+            note = "Practice run: everything was filled in for $recipient, Send not tapped"
+            again(GAP_MS)
             return
         }
 
-        // Everything on screen matches the queue - safe to send.
         val send = Screen.sendButton(nodes)
         if (send == null) {
-            if (inPhaseFor() > COMPOSE_TIMEOUT_MS) {
-                dump(nodes, "no-send-button")
-                pause("Could not find Gmail's Send button for $recipient.")
+            if (++tries > TRIES_PER_STEP) {
+                giveUp(nodes, "Could not find Gmail's Send button for $recipient.")
             } else again()
             return
         }
 
-        enterPhase(Phase.CONFIRMING)
+        go(Step.CONFIRMING, "Waiting for Gmail to confirm")
         if (!Screen.tap(send)) {
             Batch.setState(
                 this,
                 Batch.UNCERTAIN,
                 "Send would not tap for $recipient. Check Gmail's Sent folder."
             )
-            phase = Phase.WAITING
-        } else {
-            again(900)
-        }
+            step = Step.IDLE
+        } else again(900)
     }
 
-    /** Chooses the assigned account from the list Gmail just opened. */
-    private fun switchAccount(nodes: List<AccessibilityNodeInfo>) {
-        val option = nodes.firstOrNull { Screen.label(it).contains(sender, true) }
-        if (option != null && Screen.tap(option)) {
-            enterPhase(Phase.FILLING)
-            again(900)
-            return
-        }
-        if (inPhaseFor() > SWITCH_TIMEOUT_MS) {
-            dump(nodes, "account-not-in-list")
-            pause(
-                "$sender was not in Gmail's account list. Make sure it is signed " +
-                    "into the Gmail app on this phone."
-            )
-        } else again()
-    }
-
-    /**
-     * Waits for Gmail itself to say the message went. A send is only counted
-     * once Gmail confirms it, so a resumed run never sends a second copy.
-     */
-    private fun confirm(nodes: List<AccessibilityNodeInfo>) {
-        val confirmed = nodes.any { node ->
-            val text = Screen.label(node).trim()
-            text.equals("Message sent", true) ||
-                text.equals("Sent", true) ||
-                text.startsWith("Sending", true) ||
-                text.contains("Message sent", true)
+    /** Step 8: only count it once Gmail says so. */
+    private fun confirming(nodes: List<AccessibilityNodeInfo>) {
+        val confirmed = nodes.any {
+            val text = Screen.label(it).trim()
+            text.equals("Message sent", true) || text.equals("Sent", true) ||
+                text.startsWith("Sending", true) || text.contains("Message sent", true)
         }
 
         if (confirmed) {
             Batch.mark(this, index, Batch.SENT)
             Senders.countSend(this, sender)
-            phase = Phase.WAITING
+            step = Step.IDLE
+            note = "Sent to $recipient"
             notBefore = System.currentTimeMillis() + GAP_MS
             again(GAP_MS)
             return
         }
 
-        // Leaving compose without a visible confirmation usually means it sent,
-        // but "usually" is not good enough when a duplicate is the cost.
-        if (inPhaseFor() > CONFIRM_TIMEOUT_MS) {
+        // Compose has closed and no error is showing: Gmail took the message.
+        if (!Screen.compose(nodes).isCompose && tries > 2) {
+            Batch.mark(this, index, Batch.SENT)
+            Senders.countSend(this, sender)
+            step = Step.IDLE
+            note = "Sent to $recipient"
+            notBefore = System.currentTimeMillis() + GAP_MS
+            again(GAP_MS)
+            return
+        }
+
+        if (++tries > TRIES_PER_STEP + 4) {
             Batch.setState(
                 this,
                 Batch.UNCERTAIN,
                 "Tapped Send for $recipient but saw no confirmation. " +
                     "Check Gmail's Sent folder before continuing."
             )
-            phase = Phase.WAITING
+            step = Step.IDLE
             return
         }
         again(800)
     }
 
-    // --------------------------------------------------------- diagnostics
+    // ------------------------------------------------------------ for the app
 
-    /** Records what the bot saw, so a mis-targeted tap can be fixed exactly. */
-    private fun dump(nodes: List<AccessibilityNodeInfo>, tag: String) {
-        Diagnostics.save(this, tag, nodes)
-    }
-
-    /** Starts or resumes work without waiting for Gmail to send an event. */
-    fun kick() {
-        phase = Phase.WAITING
-        again(300)
-    }
-
-    /** Called from the app's Save diagnostics button. */
+    /** Records the current screen on demand, whatever is showing. */
     fun dumpNow(tag: String): Boolean {
         val root = rootInActiveWindow ?: return false
         Diagnostics.save(this, tag, Screen.all(root))
         return true
     }
 
-    /** The owner resolved an uncertain send by checking Gmail themselves. */
     fun resolveUncertain(alreadySent: Boolean) {
         if (Batch.state(this) != Batch.UNCERTAIN) return
         if (index >= 0) {
@@ -376,7 +468,7 @@ class GmailBot : AccessibilityService() {
                 Batch.mark(this, index, Batch.PENDING)
             }
         }
-        phase = Phase.WAITING
+        step = Step.IDLE
         Batch.setState(this, Batch.RUNNING, "Resumed after checking Gmail.")
         again(1200)
     }

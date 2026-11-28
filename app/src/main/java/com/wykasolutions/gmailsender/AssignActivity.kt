@@ -32,7 +32,7 @@ class AssignActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = Color.parseColor("#EEF2FA")
+        window.statusBarColor = Color.parseColor("#F6F8FC")
 
         if (!Batch.exists(this)) {
             Toast.makeText(this, "Build the queue first", Toast.LENGTH_LONG).show()
@@ -43,13 +43,13 @@ class AssignActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(20), dp(16), dp(12))
-            setBackgroundColor(Color.parseColor("#EEF2FA"))
+            setBackgroundColor(Color.parseColor("#F6F8FC"))
         }
 
         heading = TextView(this).apply {
             textSize = 20f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#17243D"))
+            setTextColor(Color.parseColor("#202124"))
             setPadding(0, 0, 0, dp(8))
         }
         root.addView(heading)
@@ -67,8 +67,8 @@ class AssignActivity : Activity() {
             }
         }
 
-        action("All from one account", "#365ADF") { chooseOneForAll() }
-        action("Split evenly across accounts", "#4A5873") { splitEvenly() }
+        action("All from one account", "#D93025") { chooseOneForAll() }
+        action("Split evenly across accounts", "#5F6368") { splitEvenly() }
 
         listView = ListView(this).apply {
             divider = null
@@ -154,7 +154,7 @@ class AssignActivity : Activity() {
                 setBackgroundColor(Color.WHITE)
                 addView(TextView(this@AssignActivity).apply {
                     textSize = 15f
-                    setTextColor(Color.parseColor("#17243D"))
+                    setTextColor(Color.parseColor("#202124"))
                 }, LinearLayout.LayoutParams(0, -2, 1f))
                 addView(Spinner(this@AssignActivity), LinearLayout.LayoutParams(dp(170), -2))
             }
@@ -166,7 +166,7 @@ class AssignActivity : Activity() {
             emailView.text = Batch.recipient(this@AssignActivity, position) +
                 if (state == Batch.SENT) "  (sent)" else ""
             emailView.setTextColor(
-                Color.parseColor(if (state == Batch.SENT) "#67748C" else "#17243D")
+                Color.parseColor(if (state == Batch.SENT) "#5F6368" else "#202124")
             )
 
             val senders = Senders.list(this@AssignActivity)

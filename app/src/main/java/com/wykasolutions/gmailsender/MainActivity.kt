@@ -69,7 +69,7 @@ class MainActivity : Activity() {
         text: String,
         size: Float = 16f,
         bold: Boolean = false,
-        color: String = "#17243D"
+        color: String = "#202124"
     ): TextView = TextView(this).also {
         it.text = text
         it.textSize = size
@@ -82,7 +82,7 @@ class MainActivity : Activity() {
     private fun button(
         parent: LinearLayout,
         title: String,
-        tint: String = "#365ADF",
+        tint: String = "#D93025",
         action: () -> Unit
     ) = Button(this).also {
         it.text = title
@@ -97,16 +97,17 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = Color.parseColor("#EEF2FA")
-        window.navigationBarColor = Color.parseColor("#EEF2FA")
+        window.statusBarColor = Color.parseColor("#F6F8FC")
+        window.navigationBarColor = Color.parseColor("#F6F8FC")
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(24), dp(20), dp(32))
-            setBackgroundColor(Color.parseColor("#EEF2FA"))
+            setBackgroundColor(Color.parseColor("#F6F8FC"))
         }
+        // Cards sit on Gmail's grey surface with a white sheet, as Gmail does.
 
-        label(root, "WYKA • GMAIL SENDER", 13f, true, "#67748C")
+        label(root, "WYKA • GMAIL SENDER", 13f, true, "#D93025")
         label(root, "One message.\nIndividual emails.", 28f, true)
         label(
             root,
@@ -114,7 +115,7 @@ class MainActivity : Activity() {
                 "and nobody sees another address.",
             15f,
             false,
-            "#49566F"
+            "#5F6368"
         )
 
         fun card(title: String): LinearLayout = LinearLayout(this).also {
@@ -132,10 +133,10 @@ class MainActivity : Activity() {
                 it.textSize = 16f
                 it.minLines = lines
                 it.gravity = Gravity.TOP
-                it.setTextColor(Color.parseColor("#17243D"))
-                it.setHintTextColor(Color.parseColor("#67748C"))
+                it.setTextColor(Color.parseColor("#202124"))
+                it.setHintTextColor(Color.parseColor("#5F6368"))
                 it.setPadding(dp(12), dp(14), dp(12), dp(14))
-                it.background = rounded("#F3F5FA")
+                it.background = rounded("#F1F3F4")
                 it.inputType = if (lines > 1)
                     InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 else InputType.TYPE_CLASS_TEXT
@@ -152,7 +153,7 @@ class MainActivity : Activity() {
                 "this phone. The bot switches between them for you.",
             14f,
             false,
-            "#49566F"
+            "#5F6368"
         )
         senderList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         senderCard.addView(senderList)
@@ -172,10 +173,10 @@ class MainActivity : Activity() {
             "One per line, or separated by commas. Duplicates are removed.",
             14f,
             false,
-            "#49566F"
+            "#5F6368"
         )
         recipientCount = label(recipientCard, "", 15f, true)
-        button(recipientCard, "Import TXT or CSV list", "#4A5873") {
+        button(recipientCard, "Import TXT or CSV list", "#5F6368") {
             startActivityForResult(
                 Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     type = "*/*"
@@ -198,12 +199,12 @@ class MainActivity : Activity() {
                 "across several. You can also set the account for each recipient.",
             14f,
             false,
-            "#49566F"
+            "#5F6368"
         )
         label(assignCard, "Default account", 15f, true)
         defaultSender = Spinner(this).also {
             it.setPadding(dp(8), dp(8), dp(8), dp(8))
-            it.background = rounded("#F3F5FA")
+            it.background = rounded("#F1F3F4")
             assignCard.addView(
                 it,
                 LinearLayout.LayoutParams(-1, dp(56)).apply { topMargin = dp(8) }
@@ -211,7 +212,7 @@ class MainActivity : Activity() {
         }
         queueSummary = label(assignCard, "", 15f)
         button(assignCard, "Build the queue") { buildQueue() }
-        button(assignCard, "Choose account per recipient", "#4A5873") { openAssign() }
+        button(assignCard, "Choose account per recipient", "#5F6368") { openAssign() }
 
         // 5 - run it
         val runCard = card("5  Run the bot")
@@ -219,7 +220,7 @@ class MainActivity : Activity() {
         practiceRun = CheckBox(this).also {
             it.text = "Practice run - fill everything in but do not tap Send"
             it.textSize = 15f
-            it.setTextColor(Color.parseColor("#17243D"))
+            it.setTextColor(Color.parseColor("#202124"))
             it.isChecked = GmailBot.dryRun(this)
             it.setOnCheckedChangeListener { _, checked -> GmailBot.setDryRun(this, checked) }
             runCard.addView(it, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
@@ -230,25 +231,26 @@ class MainActivity : Activity() {
                 "keep the phone unlocked with Gmail on screen and do not touch it.",
             14f,
             false,
-            "#49566F"
+            "#5F6368"
         )
-        button(runCard, "Turn the bot on in Settings", "#4A5873") {
+        button(runCard, "Turn the bot on in Settings", "#5F6368") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
         button(runCard, "Start sending") { start() }
 
         val progressCard = card("Progress")
         progress = label(progressCard, "", 16f)
-        failureReport = label(progressCard, "", 13f, false, "#8A2B2B")
-        button(progressCard, "Pause", "#4A5873") {
+        failureReport = label(progressCard, "", 13f, false, "#C5221F")
+        button(progressCard, "Pause", "#5F6368") {
             if (Batch.exists(this)) Batch.setState(this, Batch.PAUSED, "Paused by you.")
             refreshProgress()
         }
         button(progressCard, "Resume") { resume() }
-        button(progressCard, "Retry failed only", "#4A5873") { retryFailed() }
-        button(progressCard, "I checked Gmail - resolve", "#4A5873") { resolveUncertain() }
-        button(progressCard, "Save diagnostics", "#4A5873") { saveDiagnostics() }
-        button(progressCard, "Clear this queue", "#8A2B2B") { clearQueue() }
+        button(progressCard, "Retry failed only", "#5F6368") { retryFailed() }
+        button(progressCard, "I checked Gmail - resolve", "#5F6368") { resolveUncertain() }
+        button(progressCard, "1. Capture the Gmail screen", "#188038") { captureGmail() }
+        button(progressCard, "2. Save diagnostics", "#5F6368") { saveDiagnostics() }
+        button(progressCard, "Clear this queue", "#C5221F") { clearQueue() }
 
         setContentView(ScrollView(this).apply {
             isFillViewport = true
@@ -290,7 +292,7 @@ class MainActivity : Activity() {
         senderList.removeAllViews()
 
         if (senders.isEmpty()) {
-            label(senderList, "No accounts added yet.", 15f, true, "#8A2B2B")
+            label(senderList, "No accounts added yet.", 15f, true, "#C5221F")
         } else {
             senders.forEach { email ->
                 val row = LinearLayout(this).apply {
@@ -301,15 +303,15 @@ class MainActivity : Activity() {
                     val used = Senders.sentToday(this, email)
                     it.text = "$email\n$used of ${Senders.DAILY_CAP} sent today"
                     it.textSize = 15f
-                    it.setTextColor(Color.parseColor(if (Senders.atCap(this, email)) "#8A2B2B" else "#17243D"))
+                    it.setTextColor(Color.parseColor(if (Senders.atCap(this, email)) "#C5221F" else "#202124"))
                     row.addView(it, LinearLayout.LayoutParams(0, -2, 1f))
                 }
                 Button(this).also {
                     it.text = "Remove"
                     it.isAllCaps = false
-                    it.setTextColor(Color.parseColor("#8A2B2B"))
+                    it.setTextColor(Color.parseColor("#C5221F"))
                     it.backgroundTintList =
-                        android.content.res.ColorStateList.valueOf(Color.parseColor("#F3F5FA"))
+                        android.content.res.ColorStateList.valueOf(Color.parseColor("#F1F3F4"))
                     it.setOnClickListener {
                         Senders.remove(this, email)
                         refreshSenders()
@@ -355,7 +357,7 @@ class MainActivity : Activity() {
         val (valid, invalid) = parsedRecipients()
         recipientCount.text = "${valid.size} unique recipients" +
             if (invalid > 0) " - $invalid invalid entries to fix" else ""
-        recipientCount.setTextColor(Color.parseColor(if (invalid > 0) "#8A2B2B" else "#17243D"))
+        recipientCount.setTextColor(Color.parseColor(if (invalid > 0) "#C5221F" else "#202124"))
     }
 
     private fun saveDraft() {
@@ -540,6 +542,45 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /**
+     * Opens a Gmail compose screen and records it, with no queue and nothing
+     * sent. This is what makes a stuck step fixable rather than guessed at.
+     */
+    private fun captureGmail() {
+        if (!GmailBot.isEnabled()) {
+            AlertDialog.Builder(this)
+                .setTitle("Turn the bot on first")
+                .setMessage(
+                    "The capture uses the same permission as the bot. Switch on " +
+                        "Gmail Sender under Accessibility, then try again."
+                )
+                .setPositiveButton("Open settings") { _, _ ->
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Capture the Gmail screen")
+            .setMessage(
+                "Gmail will open a new email. Wait about three seconds, then come " +
+                    "back here and tap Save diagnostics.\n\nNothing is sent."
+            )
+            .setPositiveButton("Open Gmail") { _, _ ->
+                GmailBot.captureNext = true
+                GmailBot.openCompose(
+                    this,
+                    "test@example.com",
+                    "Test subject",
+                    "Test message body."
+                )
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun saveDiagnostics() {
         val text = Diagnostics.read(this)
         if (text.isBlank()) {
@@ -593,7 +634,7 @@ class MainActivity : Activity() {
             }
             if (GmailBot.note.isNotBlank()) append("\n").append(GmailBot.note)
         }
-        botState.setTextColor(Color.parseColor(if (GmailBot.isEnabled()) "#1F6B3B" else "#8A2B2B"))
+        botState.setTextColor(Color.parseColor(if (GmailBot.isEnabled()) "#188038" else "#C5221F"))
 
         if (!Batch.exists(this)) {
             progress.text = "No queue yet."
@@ -617,7 +658,7 @@ class MainActivity : Activity() {
             if (reason.isNotBlank()) append("\n$reason")
         }
         progress.setTextColor(
-            Color.parseColor(if (state == Batch.UNCERTAIN) "#8A2B2B" else "#17243D")
+            Color.parseColor(if (state == Batch.UNCERTAIN) "#C5221F" else "#202124")
         )
 
         val failures = Batch.failures(this)

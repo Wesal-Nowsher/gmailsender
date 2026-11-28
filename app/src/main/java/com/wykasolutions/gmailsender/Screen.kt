@@ -54,9 +54,16 @@ object Screen {
     fun bounds(node: AccessibilityNodeInfo): Rect =
         Rect().also { node.getBoundsInScreen(it) }
 
+    /**
+     * Whether the node occupies real space on screen.
+     *
+     * Deliberately does NOT require isVisibleToUser: Gmail reports false for
+     * that on fields that are plainly there and typeable, which would hide
+     * every compose box from the bot.
+     */
     fun isOnScreen(node: AccessibilityNodeInfo): Boolean {
         val r = bounds(node)
-        return node.isVisibleToUser && r.width() > 0 && r.height() > 0
+        return r.width() > 0 && r.height() > 0
     }
 
     fun tappable(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {

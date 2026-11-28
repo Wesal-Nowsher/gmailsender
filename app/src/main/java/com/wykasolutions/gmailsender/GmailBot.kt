@@ -1,6 +1,8 @@
 package com.wykasolutions.gmailsender
 
 import android.accessibilityservice.AccessibilityService
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -40,6 +42,10 @@ class GmailBot : AccessibilityService() {
         /** What the bot is working on, shown in the app. */
         @Volatile
         var note: String = ""
+
+        /** Set by the app's Capture button: record the next Gmail screen seen. */
+        @Volatile
+        var captureNext: Boolean = false
 
         const val GAP_MS = 2500L
 
@@ -107,6 +113,26 @@ class GmailBot : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.packageName?.toString() != GMAIL) return
+
+        // A capture was asked for: record whatever Gmail is showing, run or no run.
+        if (captureNext) {
+            val root = rootInActiveWindow
+            if (root != null) {
+                val nodes = Screen.all(root)
+                val compose = Screen.compose(nodes)
+                Diagnostics.save(
+                    this,
+                    "capture (${compose.boxes} text boxes found" +
+                        ", to=${compose.to != null}" +
+                        ", subject=${compose.subject != null}" +
+                        ", body=${compose.body != null}" +
+                        ", send=${Screen.sendButton(nodes) != null})",
+                    nodes
+                )
+                captureNext = false
+            }
+        }
+
         again(350)
     }
 
@@ -332,7 +358,12 @@ class GmailBot : AccessibilityService() {
         // Tap it, take focus, then type - the same order a person uses.
         Screen.tap(field)
         Screen.focus(field)
-        Screen.setText(field, value)
+        val typed = Screen.setText(field, value)
+
+        // Some Gmail builds refuse to have text set on them. Pasting is a
+        // different mechanism and often works where setting text does not.
+        if (!typed || tries >= 3) paste(field, value)
+
         again(700)
     }
 
@@ -447,6 +478,16 @@ class GmailBot : AccessibilityService() {
             return
         }
         again(800)
+    }
+
+    /** Puts the value on the clipboard and pastes it into the focused box. */
+    private fun paste(field: AccessibilityNodeInfo, value: String) {
+        runCatching {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("gmail-sender", value))
+            field.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            field.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+        }
     }
 
     // ------------------------------------------------------------ for the app

@@ -56,6 +56,5 @@ kotlin {
     }
 }
 
-dependencies {
-    implementation("com.google.android.gms:play-services-auth:21.2.0")
-}
+// No third-party dependencies: the account picker and the accessibility APIs
+// are both part of Android itself.

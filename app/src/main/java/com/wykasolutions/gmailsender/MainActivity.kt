@@ -1,18 +1,16 @@
 package com.wykasolutions.gmailsender
 
-import android.Manifest
 import android.accounts.AccountManager
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -32,23 +30,23 @@ class MainActivity : Activity() {
     private companion object {
         const val REQUEST_IMPORT = 10
         const val REQUEST_PICK_ACCOUNT = 11
-        const val REQUEST_CONSENT = 12
-        const val REQUEST_NOTIFICATIONS = 13
     }
 
-    private lateinit var accountList: LinearLayout
-    private lateinit var fromSpinner: Spinner
+    private lateinit var senderList: LinearLayout
+    private lateinit var defaultSender: Spinner
     private lateinit var recipients: EditText
     private lateinit var subject: EditText
     private lateinit var body: EditText
     private lateinit var recipientCount: TextView
+    private lateinit var queueSummary: TextView
     private lateinit var progress: TextView
     private lateinit var failureReport: TextView
+    private lateinit var botState: TextView
 
     private val handler = Handler(Looper.getMainLooper())
     private val draft by lazy { getSharedPreferences("draft", 0) }
-    private val emailPattern = Regex("^[A-Z0-9._%+\\-]+@[A-Z0-9.\\-]+\\.[A-Z]{2,}$", RegexOption.IGNORE_CASE)
-    private var awaitingConsentFor: String? = null
+    private val emailPattern =
+        Regex("^[A-Z0-9._%+\\-]+@[A-Z0-9.\\-]+\\.[A-Z]{2,}$", RegexOption.IGNORE_CASE)
 
     private val tick = object : Runnable {
         override fun run() {
@@ -56,8 +54,6 @@ class MainActivity : Activity() {
             handler.postDelayed(this, 1000)
         }
     }
-
-    // ---------- small view helpers, kept here so the app needs no layout files ----------
 
     private fun dp(n: Int) = (resources.displayMetrics.density * n).toInt()
 
@@ -91,7 +87,8 @@ class MainActivity : Activity() {
         it.isAllCaps = false
         it.textSize = 16f
         it.setTextColor(Color.WHITE)
-        it.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor(tint))
+        it.backgroundTintList =
+            android.content.res.ColorStateList.valueOf(Color.parseColor(tint))
         parent.addView(it, LinearLayout.LayoutParams(-1, dp(54)).apply { topMargin = dp(8) })
         it.setOnClickListener { action() }
     }
@@ -111,7 +108,8 @@ class MainActivity : Activity() {
         label(root, "One message.\nIndividual emails.", 28f, true)
         label(
             root,
-            "Every recipient gets their own email. Nobody sees anyone else's address.",
+            "The bot works Gmail for you, one recipient at a time. Nobody is CC'd " +
+                "and nobody sees another address.",
             15f,
             false,
             "#49566F"
@@ -138,48 +136,38 @@ class MainActivity : Activity() {
                 it.background = rounded("#F3F5FA")
                 it.inputType = if (lines > 1)
                     InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                else
-                    InputType.TYPE_CLASS_TEXT
+                else InputType.TYPE_CLASS_TEXT
                 it.setText(draft.getString(key, ""))
                 parent.addView(it, LinearLayout.LayoutParams(-1, -2))
             }
         }
 
-        // 1 - the business accounts, authorised once each
-        val accountCard = card("1  Your sending accounts")
+        // 1 - the business accounts already signed into Gmail on this phone
+        val senderCard = card("1  Your Gmail accounts")
         label(
-            accountCard,
-            "Add each business Gmail once. Android shows the accounts already signed in on " +
-                "this phone - pick one and tap Allow. No passwords are entered or stored.",
+            senderCard,
+            "Add each business Gmail that is already signed into the Gmail app on " +
+                "this phone. The bot switches between them for you.",
             14f,
             false,
             "#49566F"
         )
-        accountList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        accountCard.addView(accountList)
-        button(accountCard, "Add sending account") { pickAccount() }
+        senderList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        senderCard.addView(senderList)
+        button(senderCard, "Add a Gmail account") { pickAccount() }
 
-        // 2 - which account this batch goes out from
-        val fromCard = card("2  Send this batch from")
-        fromSpinner = Spinner(this).also {
-            it.setPadding(dp(8), dp(8), dp(8), dp(8))
-            it.background = rounded("#F3F5FA")
-            fromCard.addView(it, LinearLayout.LayoutParams(-1, dp(56)).apply { topMargin = dp(8) })
-        }
-        label(fromCard, "", 14f, false, "#49566F").also { quotaLine = it }
-
-        // 3 - the recipients
-        val recipientCard = card("3  Recipients")
+        // 2 - recipients
+        val recipientCard = card("2  Recipients")
         recipients = field(
             recipientCard,
-            "To - receiver email list",
+            "Send to",
             "alice@example.com\nbob@example.com\ncarol@example.com",
             "recipients",
             5
         )
         label(
             recipientCard,
-            "One address per line, or separated by commas or semicolons. Duplicates are removed.",
+            "One per line, or separated by commas. Duplicates are removed.",
             14f,
             false,
             "#49566F"
@@ -195,35 +183,62 @@ class MainActivity : Activity() {
             )
         }
 
-        // 4 - the message
-        val composeCard = card("4  Write the email")
+        // 3 - the message
+        val composeCard = card("3  Write the email")
         subject = field(composeCard, "Subject", "e.g. Updated quotation for your review", "subject")
-        body = field(
-            composeCard,
-            "Message",
-            "Write the email each person should receive...",
-            "body",
-            8
-        )
+        body = field(composeCard, "Message", "Write the email each person receives...", "body", 8)
 
-        // 5 - send
-        val sendCard = card("5  Send")
+        // 4 - which account sends to whom
+        val assignCard = card("4  Who sends to whom")
         label(
-            sendCard,
-            "Sending runs in the background. You can lock the phone or use other apps.",
+            assignCard,
+            "Build the queue, then send everything from one account or split it " +
+                "across several. You can also set the account for each recipient.",
             14f,
             false,
             "#49566F"
         )
-        button(sendCard, "Review and send") { review() }
+        label(assignCard, "Default account", 15f, true)
+        defaultSender = Spinner(this).also {
+            it.setPadding(dp(8), dp(8), dp(8), dp(8))
+            it.background = rounded("#F3F5FA")
+            assignCard.addView(
+                it,
+                LinearLayout.LayoutParams(-1, dp(56)).apply { topMargin = dp(8) }
+            )
+        }
+        queueSummary = label(assignCard, "", 15f)
+        button(assignCard, "Build the queue") { buildQueue() }
+        button(assignCard, "Choose account per recipient", "#4A5873") { openAssign() }
+
+        // 5 - run it
+        val runCard = card("5  Run the bot")
+        botState = label(runCard, "", 15f, true)
+        label(
+            runCard,
+            "The bot needs Accessibility permission to work Gmail. While it runs, " +
+                "keep the phone unlocked with Gmail on screen and do not touch it.",
+            14f,
+            false,
+            "#49566F"
+        )
+        button(runCard, "Turn the bot on in Settings", "#4A5873") {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+        button(runCard, "Start sending") { start() }
 
         val progressCard = card("Progress")
         progress = label(progressCard, "", 16f)
         failureReport = label(progressCard, "", 13f, false, "#8A2B2B")
-        button(progressCard, "Pause", "#4A5873") { SendService.stop(this) }
-        button(progressCard, "Resume remaining") { resume() }
+        button(progressCard, "Pause", "#4A5873") {
+            if (Batch.exists(this)) Batch.setState(this, Batch.PAUSED, "Paused by you.")
+            refreshProgress()
+        }
+        button(progressCard, "Resume") { resume() }
         button(progressCard, "Retry failed only", "#4A5873") { retryFailed() }
-        button(progressCard, "Clear this batch", "#8A2B2B") { clearBatch() }
+        button(progressCard, "I checked Gmail - resolve", "#4A5873") { resolveUncertain() }
+        button(progressCard, "Save diagnostics", "#4A5873") { saveDiagnostics() }
+        button(progressCard, "Clear this queue", "#8A2B2B") { clearQueue() }
 
         setContentView(ScrollView(this).apply {
             isFillViewport = true
@@ -241,24 +256,13 @@ class MainActivity : Activity() {
             })
         }
 
-        askForNotifications()
-        refreshAccounts()
+        refreshSenders()
         updateRecipientCount()
     }
 
-    private lateinit var quotaLine: TextView
-
-    // ---------- accounts ----------
-
-    private fun askForNotifications() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
-        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
-    }
+    // ---------------------------------------------------------------- accounts
 
     private fun pickAccount() {
-        // Android's own picker: it lists the Google accounts already signed in on this
-        // phone, and choosing one here is what makes it visible to this app.
         val intent = AccountManager.newChooseAccountIntent(
             null,
             null as List<android.accounts.Account>?,
@@ -271,60 +275,23 @@ class MainActivity : Activity() {
         startActivityForResult(intent, REQUEST_PICK_ACCOUNT)
     }
 
-    /** Asks Google for a send token, which triggers the one-time Allow screen. */
-    private fun authorise(email: String) {
-        Toast.makeText(this, "Checking permission for $email", Toast.LENGTH_SHORT).show()
-        Thread {
-            val result = GmailApi.authorise(this, email)
-            runOnUiThread {
-                when (result) {
-                    is GmailApi.Result.Sent -> {
-                        Accounts.add(this, email)
-                        refreshAccounts()
-                        Toast.makeText(this, "$email is ready to send", Toast.LENGTH_LONG).show()
-                    }
-                    is GmailApi.Result.NeedsConsent -> {
-                        val consent = result.intent
-                        if (consent == null) {
-                            Toast.makeText(this, "Google did not return a permission screen", Toast.LENGTH_LONG).show()
-                        } else {
-                            awaitingConsentFor = email
-                            startActivityForResult(consent, REQUEST_CONSENT)
-                        }
-                    }
-                    is GmailApi.Result.Retryable ->
-                        Toast.makeText(this, "No network: ${result.message}", Toast.LENGTH_LONG).show()
-                    is GmailApi.Result.Permanent ->
-                        AlertDialog.Builder(this)
-                            .setTitle("Could not authorise $email")
-                            .setMessage(
-                                result.message +
-                                    "\n\nIf this says the app is not configured, the Google Cloud " +
-                                    "OAuth client for this APK's signing key is missing. See the README."
-                            )
-                            .setPositiveButton("OK", null)
-                            .show()
-                }
-            }
-        }.start()
-    }
+    private fun refreshSenders() {
+        val senders = Senders.list(this)
+        senderList.removeAllViews()
 
-    private fun refreshAccounts() {
-        val accounts = Accounts.list(this)
-        accountList.removeAllViews()
-
-        if (accounts.isEmpty()) {
-            label(accountList, "No accounts added yet.", 15f, true, "#8A2B2B")
+        if (senders.isEmpty()) {
+            label(senderList, "No accounts added yet.", 15f, true, "#8A2B2B")
         } else {
-            accounts.forEach { email ->
+            senders.forEach { email ->
                 val row = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                 }
                 TextView(this).also {
-                    it.text = "$email\n${Accounts.sentToday(this, email)} sent today"
+                    val used = Senders.sentToday(this, email)
+                    it.text = "$email\n$used of ${Senders.DAILY_CAP} sent today"
                     it.textSize = 15f
-                    it.setTextColor(Color.parseColor("#17243D"))
+                    it.setTextColor(Color.parseColor(if (Senders.atCap(this, email)) "#8A2B2B" else "#17243D"))
                     row.addView(it, LinearLayout.LayoutParams(0, -2, 1f))
                 }
                 Button(this).also {
@@ -334,51 +301,36 @@ class MainActivity : Activity() {
                     it.backgroundTintList =
                         android.content.res.ColorStateList.valueOf(Color.parseColor("#F3F5FA"))
                     it.setOnClickListener {
-                        Accounts.remove(this, email)
-                        refreshAccounts()
+                        Senders.remove(this, email)
+                        refreshSenders()
                     }
                     row.addView(it)
                 }
-                accountList.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+                senderList.addView(
+                    row,
+                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+                )
             }
         }
 
         val adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_item,
-            if (accounts.isEmpty()) listOf("Add an account first") else accounts
+            if (senders.isEmpty()) listOf("Add an account first") else senders
         )
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        fromSpinner.adapter = adapter
-        fromSpinner.isEnabled = accounts.isNotEmpty()
+        defaultSender.adapter = adapter
+        defaultSender.isEnabled = senders.isNotEmpty()
 
-        val saved = draft.getString("from", "")
-        val savedIndex = accounts.indexOfFirst { it.equals(saved, true) }
-        if (savedIndex >= 0) fromSpinner.setSelection(savedIndex)
-
-        updateQuotaLine()
+        val saved = draft.getString("sender", "")
+        val savedIndex = senders.indexOfFirst { it.equals(saved, true) }
+        if (savedIndex >= 0) defaultSender.setSelection(savedIndex)
     }
 
-    private fun selectedAccount(): String? {
-        val accounts = Accounts.list(this)
-        if (accounts.isEmpty()) return null
-        val index = fromSpinner.selectedItemPosition
-        return accounts.getOrNull(index)
-    }
+    private fun selectedSender(): String? =
+        Senders.list(this).getOrNull(defaultSender.selectedItemPosition)
 
-    private fun updateQuotaLine() {
-        val account = selectedAccount()
-        quotaLine.text = if (account == null) {
-            "Add at least one sending account above."
-        } else {
-            val used = Accounts.sentToday(this, account)
-            val cap = SendService.dailyCap(this)
-            "$used of $cap sent today from this account. Google's own daily limit is about " +
-                "500 for free Gmail and 2,000 for Workspace."
-        }
-    }
-
-    // ---------- recipients and draft ----------
+    // -------------------------------------------------------------- recipients
 
     private fun parsedRecipients(): Pair<List<String>, Int> {
         val parts = recipients.text.toString()
@@ -398,22 +350,21 @@ class MainActivity : Activity() {
 
     private fun saveDraft() {
         draft.edit()
-            .putString("from", selectedAccount().orEmpty())
+            .putString("sender", selectedSender().orEmpty())
             .putString("recipients", recipients.text.toString())
             .putString("subject", subject.text.toString())
             .putString("body", body.text.toString())
             .apply()
     }
 
-    // ---------- sending ----------
+    // ------------------------------------------------------------------ queue
 
-    private fun review() {
-        val account = selectedAccount()
-        if (account == null) {
-            Toast.makeText(this, "Add a sending account first", Toast.LENGTH_LONG).show()
+    private fun buildQueue() {
+        val sender = selectedSender()
+        if (sender == null) {
+            Toast.makeText(this, "Add a Gmail account first", Toast.LENGTH_LONG).show()
             return
         }
-
         val (valid, invalid) = parsedRecipients()
         if (invalid > 0) {
             recipients.error = "Remove or fix $invalid invalid entries"
@@ -427,51 +378,97 @@ class MainActivity : Activity() {
         }
         if (subject.text.isBlank()) {
             subject.error = "Add a subject"
-            subject.requestFocus()
             return
         }
         if (body.text.isBlank()) {
             body.error = "Write the message"
-            body.requestFocus()
+            return
+        }
+        if (Batch.state(this) == Batch.RUNNING) {
+            Toast.makeText(this, "Pause the running queue first", Toast.LENGTH_LONG).show()
             return
         }
 
-        if (SendService.running || Batch.state(this) == Batch.RUNNING) {
-            Toast.makeText(this, "A batch is already running", Toast.LENGTH_LONG).show()
+        val existing = Batch.counts(this)
+        val replace = Batch.exists(this) && existing.pending > 0
+
+        fun create() {
+            saveDraft()
+            Batch.build(this, valid, sender, subject.text.toString(), body.text.toString())
+            refreshProgress()
+            Toast.makeText(
+                this,
+                "Queue built: ${valid.size} recipients, all from $sender",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+
+        if (replace) {
+            AlertDialog.Builder(this)
+                .setTitle("Replace the current queue?")
+                .setMessage("It still has ${existing.pending} recipients that have not been sent to.")
+                .setPositiveButton("Replace") { _, _ -> create() }
+                .setNegativeButton("Keep it", null)
+                .show()
+        } else create()
+    }
+
+    private fun openAssign() {
+        if (!Batch.exists(this)) {
+            Toast.makeText(this, "Build the queue first", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (Batch.state(this) == Batch.RUNNING) {
+            Toast.makeText(this, "Pause the queue before reassigning", Toast.LENGTH_LONG).show()
+            return
+        }
+        startActivity(Intent(this, AssignActivity::class.java))
+    }
+
+    // -------------------------------------------------------------- running
+
+    private fun start() {
+        if (!Batch.exists(this)) {
+            Toast.makeText(this, "Build the queue first", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (!GmailBot.isEnabled()) {
+            AlertDialog.Builder(this)
+                .setTitle("Turn the bot on first")
+                .setMessage(
+                    "Open Accessibility settings, find Gmail Sender, and switch it on. " +
+                        "That is what lets the app tap inside Gmail."
+                )
+                .setPositiveButton("Open settings") { _, _ ->
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
             return
         }
 
         val counts = Batch.counts(this)
-        val unfinished = Batch.exists(this) && counts.pending > 0
-        val warning = if (unfinished)
-            "\n\nThis replaces the current batch, which still has ${counts.pending} unsent recipients."
-        else ""
+        if (counts.pending == 0) {
+            Toast.makeText(this, "Nothing left to send", Toast.LENGTH_LONG).show()
+            return
+        }
 
-        val remainingToday = SendService.dailyCap(this) - Accounts.sentToday(this, account)
-        val capWarning = if (valid.size > remainingToday)
-            "\n\nOnly $remainingToday more can go out from this account today. " +
-                "The rest stay queued until tomorrow."
-        else ""
+        val perSender = Batch.perSender(this)
+            .map { (sender, pair) -> "$sender: ${pair.second}" }
+            .joinToString("\n")
 
         AlertDialog.Builder(this)
-            .setTitle("Send ${valid.size} separate emails?")
+            .setTitle("Send ${counts.pending} separate emails?")
             .setMessage(
-                "From: $account\nSubject: ${subject.text}\n\n" +
-                    valid.take(10).joinToString("\n") +
-                    (if (valid.size > 10) "\n...and ${valid.size - 10} more" else "") +
-                    capWarning + warning
+                "Subject: ${Batch.subject(this)}\n\n$perSender\n\n" +
+                    "Keep the phone unlocked and leave it alone while the bot works Gmail."
             )
-            .setPositiveButton("Start sending") { _, _ ->
-                saveDraft()
-                Batch.create(
-                    this,
-                    account,
-                    valid,
-                    subject.text.toString(),
-                    body.text.toString()
-                )
-                SendService.start(this)
+            .setPositiveButton("Start") { _, _ ->
+                Batch.setState(this, Batch.RUNNING, "Running.")
+                // Nudge the bot so it does not wait for a Gmail screen event.
+                handler.postDelayed({ GmailBot.instance?.kick() }, 300)
                 refreshProgress()
+                Toast.makeText(this, "Open Gmail and leave the phone alone", Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Back", null)
             .show()
@@ -479,15 +476,23 @@ class MainActivity : Activity() {
 
     private fun resume() {
         if (!Batch.exists(this)) {
-            Toast.makeText(this, "No batch to resume", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "No queue to resume", Toast.LENGTH_SHORT).show()
             return
         }
-        if (Batch.nextPending(this) < 0) {
+        if (Batch.state(this) == Batch.UNCERTAIN) {
+            Toast.makeText(this, "Resolve the uncertain send first", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (Batch.counts(this).pending == 0) {
             Toast.makeText(this, "Nothing left to send", Toast.LENGTH_SHORT).show()
             return
         }
-        Batch.setState(this, Batch.RUNNING)
-        SendService.start(this)
+        if (!GmailBot.isEnabled()) {
+            Toast.makeText(this, "Turn the bot on in Accessibility settings", Toast.LENGTH_LONG).show()
+            return
+        }
+        Batch.setState(this, Batch.RUNNING, "Resumed.")
+        handler.postDelayed({ GmailBot.instance?.kick() }, 300)
         refreshProgress()
     }
 
@@ -497,20 +502,68 @@ class MainActivity : Activity() {
             Toast.makeText(this, "No failed recipients", Toast.LENGTH_SHORT).show()
             return
         }
-        Batch.setState(this, Batch.RUNNING)
-        SendService.start(this)
-        Toast.makeText(this, "Retrying $moved recipients", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "$moved put back in the queue", Toast.LENGTH_LONG).show()
         refreshProgress()
     }
 
-    private fun clearBatch() {
-        if (SendService.running) {
-            Toast.makeText(this, "Pause the batch first", Toast.LENGTH_LONG).show()
+    private fun resolveUncertain() {
+        if (Batch.state(this) != Batch.UNCERTAIN) {
+            Toast.makeText(this, "Nothing uncertain right now", Toast.LENGTH_SHORT).show()
             return
         }
         AlertDialog.Builder(this)
-            .setTitle("Clear this batch?")
-            .setMessage("The send history for it is deleted. Your draft text stays.")
+            .setTitle("Check Gmail's Sent folder")
+            .setMessage(
+                Batch.reason(this) +
+                    "\n\nDid that email actually go out? Saying yes when it did not " +
+                    "means that person never gets it; saying no when it did means they get it twice."
+            )
+            .setPositiveButton("It was sent") { _, _ ->
+                GmailBot.instance?.resolveUncertain(true)
+                refreshProgress()
+            }
+            .setNegativeButton("It was not sent") { _, _ ->
+                GmailBot.instance?.resolveUncertain(false)
+                refreshProgress()
+            }
+            .setNeutralButton("Cancel", null)
+            .show()
+    }
+
+    private fun saveDiagnostics() {
+        GmailBot.instance?.dumpNow("manual")
+        val text = Diagnostics.read(this)
+        if (text.isBlank()) {
+            Toast.makeText(this, "Nothing recorded yet", Toast.LENGTH_LONG).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("What the bot sees")
+            .setMessage(text.takeLast(3000))
+            .setPositiveButton("Share") { _, _ ->
+                startActivity(
+                    Intent.createChooser(
+                        Intent(Intent.ACTION_SEND)
+                            .setType("text/plain")
+                            .putExtra(Intent.EXTRA_SUBJECT, "Gmail Sender diagnostics")
+                            .putExtra(Intent.EXTRA_TEXT, text.takeLast(100_000)),
+                        "Send diagnostics"
+                    )
+                )
+            }
+            .setNeutralButton("Clear") { _, _ -> Diagnostics.clear(this) }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun clearQueue() {
+        if (Batch.state(this) == Batch.RUNNING) {
+            Toast.makeText(this, "Pause it first", Toast.LENGTH_LONG).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Clear this queue?")
+            .setMessage("Its send history goes too. Your draft text stays.")
             .setPositiveButton("Clear") { _, _ ->
                 Batch.clear(this)
                 refreshProgress()
@@ -519,25 +572,38 @@ class MainActivity : Activity() {
             .show()
     }
 
+    // ------------------------------------------------------------- progress
+
     private fun refreshProgress() {
         if (!::progress.isInitialized) return
-        updateQuotaLine()
+
+        botState.text = if (GmailBot.isEnabled()) "Bot is on." else "Bot is off."
+        botState.setTextColor(Color.parseColor(if (GmailBot.isEnabled()) "#1F6B3B" else "#8A2B2B"))
 
         if (!Batch.exists(this)) {
-            progress.text = "No batch yet."
+            progress.text = "No queue yet."
+            queueSummary.text = ""
             failureReport.visibility = View.GONE
             return
         }
 
         val counts = Batch.counts(this)
-        val job = Batch.read(this)
-        val reason = job.optString("reason")
+        val state = Batch.state(this)
+        val reason = Batch.reason(this)
+
+        queueSummary.text = Batch.perSender(this)
+            .map { (sender, pair) -> "$sender - ${pair.second} recipients" }
+            .joinToString("\n")
+
         progress.text = buildString {
             append("${counts.sent} sent  •  ${counts.failed} failed  •  ${counts.pending} waiting")
-            append("\nof ${counts.total} recipients, from ${job.optString("from")}")
-            append("\nStatus: ${job.optString("state")}")
+            append("\nof ${counts.total} recipients")
+            append("\nStatus: $state")
             if (reason.isNotBlank()) append("\n$reason")
         }
+        progress.setTextColor(
+            Color.parseColor(if (state == Batch.UNCERTAIN) "#8A2B2B" else "#17243D")
+        )
 
         val failures = Batch.failures(this)
         if (failures.isEmpty()) {
@@ -551,7 +617,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        refreshAccounts()
+        refreshSenders()
         handler.post(tick)
     }
 
@@ -561,43 +627,35 @@ class MainActivity : Activity() {
         super.onPause()
     }
 
-    @Deprecated("Activity result API kept for this single-activity app")
+    @Deprecated("Activity result API kept for this small app")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK) return
 
         when (requestCode) {
             REQUEST_PICK_ACCOUNT -> {
-                if (resultCode != RESULT_OK) return
                 val email = data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME) ?: return
-                authorise(email)
+                Senders.add(this, email)
+                refreshSenders()
+                Toast.makeText(this, "$email added", Toast.LENGTH_LONG).show()
             }
 
-            REQUEST_CONSENT -> {
-                val email = awaitingConsentFor
-                awaitingConsentFor = null
-                if (resultCode == RESULT_OK && email != null) authorise(email)
-                else Toast.makeText(this, "Permission was not granted", Toast.LENGTH_LONG).show()
-            }
-
-            REQUEST_IMPORT -> {
-                if (resultCode != RESULT_OK) return
-                try {
-                    val uri = data?.data ?: return
-                    val text = contentResolver.openInputStream(uri)
-                        ?.bufferedReader()
-                        ?.use { it.readText().take(2_000_000) }
-                        ?: return
-                    val found = Regex(
-                        "[A-Z0-9._%+\\-]+@[A-Z0-9.\\-]+\\.[A-Z]{2,}",
-                        RegexOption.IGNORE_CASE
-                    ).findAll(text).map { it.value }.distinct().toList()
-                    recipients.setText(
-                        (recipients.text.toString() + "\n" + found.joinToString("\n")).trim()
-                    )
-                    Toast.makeText(this, "Imported ${found.size} addresses", Toast.LENGTH_LONG).show()
-                } catch (e: Exception) {
-                    Toast.makeText(this, "Could not read that file", Toast.LENGTH_LONG).show()
-                }
+            REQUEST_IMPORT -> try {
+                val uri = data?.data ?: return
+                val text = contentResolver.openInputStream(uri)
+                    ?.bufferedReader()
+                    ?.use { it.readText().take(2_000_000) }
+                    ?: return
+                val found = Regex(
+                    "[A-Z0-9._%+\\-]+@[A-Z0-9.\\-]+\\.[A-Z]{2,}",
+                    RegexOption.IGNORE_CASE
+                ).findAll(text).map { it.value }.distinct().toList()
+                recipients.setText(
+                    (recipients.text.toString() + "\n" + found.joinToString("\n")).trim()
+                )
+                Toast.makeText(this, "Imported ${found.size} addresses", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Could not read that file", Toast.LENGTH_LONG).show()
             }
         }
     }

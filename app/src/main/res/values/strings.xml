@@ -1,1 +1,4 @@
-<resources><string name="app_name">Gmail Sender</string></resources>
+<resources>
+    <string name="app_name">Gmail Sender</string>
+    <string name="accessibility_description">Works the Gmail app for you: opens a compose screen for each recipient in your queue, switches to the business account you assigned, checks the recipient, subject and message match before tapping Send, and waits for Gmail to confirm. It only acts on a queue you started, and only inside Gmail.</string>
+</resources>
